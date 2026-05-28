@@ -162,27 +162,77 @@ tab_income, tab_expenses, tab_taxes, tab_investment, tab_dashboard = st.tabs(
 
 # ── Income ────────────────────────────────────────────────────────────────────
 with tab_income:
-    st.subheader("Monthly Income Sources")
-    st.caption("Enter all monthly income (gross, before taxes)")
+    st.subheader("💰 Income & Tax Details")
+
+    # ── Primary: Annual salary + tax setup ────────────────────────────────────
+    st.markdown("### Annual Salary")
+    st.caption("Enter your annual gross salary along with your filing status and state — net monthly is calculated automatically.")
+
+    ai1, ai2, ai3 = st.columns(3)
+    with ai1:
+        st.number_input(
+            "Annual Gross Salary ($)",
+            min_value=0.0,
+            step=1000.0,
+            format="%.2f",
+            key="annual_income_calc",
+            on_change=auto_calc_taxes,
+            help="Your total pre-tax annual salary.",
+        )
+    with ai2:
+        st.selectbox(
+            "Filing Status",
+            ["Single", "Married Filing Jointly", "Married Filing Separately", "Head of Household"],
+            key="filing_status_key",
+            on_change=auto_calc_taxes,
+        )
+    with ai3:
+        st.selectbox(
+            "🗺️ State of Residence",
+            sorted(STATE_TAX.keys()),
+            key="state_selector_key",
+            on_change=auto_calc_taxes,
+        )
+
+    # Derive values from annual input
+    annual_salary   = st.session_state["annual_income_calc"]
+    monthly_salary  = annual_salary / 12
+    filing_status_inc = st.session_state["filing_status_key"]
+    state_inc         = st.session_state["state_selector_key"]
+
+    # Show quick after-tax preview immediately below the inputs
+    if annual_salary > 0:
+        _std   = STANDARD_DEDUCTIONS[filing_status_inc]
+        _tax   = calc_federal_effective_rate(max(0, annual_salary - _std), filing_status_inc)
+        _st    = calc_state_effective_rate(annual_salary, state_inc)
+        _ss    = min(annual_salary, SS_WAGE_BASE_2024) / annual_salary * 6.2
+        _med   = 1.45
+        _total = _tax + _st + _ss + _med
+        _net_monthly = (annual_salary * (1 - _total / 100)) / 12
+
+        p1, p2, p3, p4 = st.columns(4)
+        p1.metric("Monthly Gross",        f"${monthly_salary:,.2f}",  "annual ÷ 12")
+        p2.metric("Est. Monthly Taxes",   f"-${monthly_salary * _total / 100:,.2f}", f"{_total:.1f}% total rate")
+        p3.metric("Net Monthly Take-Home",f"${_net_monthly:,.2f}",    f"after {state_inc} taxes")
+        p4.metric("State",                state_inc, STATE_TAX[state_inc]["type"].title() +
+                  (f" {STATE_TAX[state_inc]['rate']}%" if STATE_TAX[state_inc]["type"] == "flat" else " brackets"))
+
+    st.divider()
+
+    # ── Additional income sources ──────────────────────────────────────────────
+    st.markdown("### Additional Income Sources")
+    st.caption("Optional — add any other monthly income on top of your salary.")
 
     col1, col2 = st.columns(2)
     with col1:
-        monthly_salary = st.number_input("Monthly Salary / Wages ($)",   min_value=0.0, step=100.0, format="%.2f")
-        freelance      = st.number_input("Freelance / Side Income ($)",   min_value=0.0, step=50.0,  format="%.2f")
-        rental         = st.number_input("Rental Income ($)",             min_value=0.0, step=50.0,  format="%.2f")
+        freelance  = st.number_input("Freelance / Side Income ($/mo)",  min_value=0.0, step=50.0,  format="%.2f")
+        rental     = st.number_input("Rental Income ($/mo)",             min_value=0.0, step=50.0,  format="%.2f")
     with col2:
-        dividends      = st.number_input("Dividends & Interest ($)",      min_value=0.0, step=10.0,  format="%.2f")
-        other_income   = st.number_input("Other Income ($)",              min_value=0.0, step=50.0,  format="%.2f")
+        dividends  = st.number_input("Dividends & Interest ($/mo)",      min_value=0.0, step=10.0,  format="%.2f")
+        other_income = st.number_input("Other Income ($/mo)",            min_value=0.0, step=50.0,  format="%.2f")
 
     total_income = monthly_salary + freelance + rental + dividends + other_income
-    st.success(f"**Total Monthly Gross Income: ${total_income:,.2f}**")
-
-    with st.expander("💡 Tips"):
-        st.markdown("""
-- Enter **gross (pre-tax)** income — taxes are handled in the Taxes tab.
-- For variable income use your **average** monthly amount.
-- You can also enter your **annual salary** in the Taxes tab to auto-calculate all rates.
-        """)
+    st.success(f"**Total Monthly Gross Income: ${total_income:,.2f}** &nbsp;&nbsp;(salary ${monthly_salary:,.2f} + additional ${freelance+rental+dividends+other_income:,.2f})")
 
 # ── Expenses ──────────────────────────────────────────────────────────────────
 with tab_expenses:
@@ -235,48 +285,20 @@ with tab_expenses:
 # ── Taxes ─────────────────────────────────────────────────────────────────────
 with tab_taxes:
     st.subheader("🏛️ Taxes & Withholdings")
+    st.caption("Annual salary, filing status, and state are set in the **Income tab**. Rates update automatically.")
 
-    # ── Step 1: Inputs (reactive — rates update instantly on any change) ───────
-    st.markdown("### Step 1 — Enter Your Details")
-    st.caption("All tax rates below update automatically as you type or change selections.")
-
-    ac1, ac2, ac3 = st.columns(3)
-    with ac1:
-        st.number_input(
-            "Annual Gross Income ($)",
-            min_value=0.0,
-            value=float(round(total_income * 12, 2)) if st.session_state["annual_income_calc"] == 0.0 else st.session_state["annual_income_calc"],
-            step=1000.0,
-            format="%.2f",
-            key="annual_income_calc",
-            on_change=auto_calc_taxes,
-            help="Defaults to monthly income × 12 from the Income tab.",
-        )
-    with ac2:
-        st.selectbox(
-            "Filing Status",
-            ["Single", "Married Filing Jointly", "Married Filing Separately", "Head of Household"],
-            key="filing_status_key",
-            on_change=auto_calc_taxes,
-        )
-    with ac3:
-        st.selectbox(
-            "🗺️ State of Residence",
-            sorted(STATE_TAX.keys()),
-            key="state_selector_key",
-            on_change=auto_calc_taxes,
-        )
-
-    # Resolve live values for display
+    # Read values set in the Income tab
     annual_income_input = st.session_state["annual_income_calc"]
     filing_status       = st.session_state["filing_status_key"]
     state_selected      = st.session_state["state_selector_key"]
     std_ded             = STANDARD_DEDUCTIONS[filing_status]
     taxable             = max(0.0, annual_income_input - std_ded)
 
-    # ── Step 2: State Tax Breakdown ────────────────────────────────────────────
-    st.divider()
-    st.markdown(f"### Step 2 — State Tax: **{state_selected}**")
+    if annual_income_input == 0:
+        st.info("👈 Go to the **Income tab** and enter your Annual Gross Salary to see your tax breakdown here.")
+
+    # ── Step 1: State Tax Breakdown ────────────────────────────────────────────
+    st.markdown(f"### Step 1 — State Tax: **{state_selected}**")
 
     state_data  = STATE_TAX[state_selected]
     state_rate_val = calc_state_effective_rate(annual_income_input, state_selected)
@@ -345,9 +367,9 @@ with tab_taxes:
             )
             st.plotly_chart(fig_cmp, use_container_width=True)
 
-    # ── Step 3: Federal Bracket Visualizer ────────────────────────────────────
+    # ── Step 2: Federal Bracket Visualizer ────────────────────────────────────
     st.divider()
-    st.markdown("### Step 3 — Federal Tax Brackets")
+    st.markdown("### Step 2 — Federal Tax Brackets")
     if annual_income_input > 0:
         brackets = (FED_BRACKETS_MFJ if filing_status == "Married Filing Jointly"
                     else FED_BRACKETS_HOH if filing_status == "Head of Household"
@@ -394,8 +416,8 @@ with tab_taxes:
 
     st.divider()
 
-    # ── Step 4: Editable Rate Fields ──────────────────────────────────────────
-    st.markdown("### Step 4 — Review & Adjust Rates")
+    # ── Step 3: Editable Rate Fields ──────────────────────────────────────────
+    st.markdown("### Step 3 — Review & Adjust Rates")
     st.caption("Rates auto-filled from the calculator above. Edit any field to override.")
 
     c1, c2, c3 = st.columns(3)
