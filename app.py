@@ -127,10 +127,30 @@ _defaults = {
     "fed_rate": 0.0, "state_rate": 0.0,
     "ss_rate": 6.2,  "med_rate": 1.45,
     "sdi_rate": 0.0, "other_rate": 0.0,
+    "annual_income_calc": 0.0,
+    "filing_status_key": "Single",
+    "state_selector_key": "Texas",
 }
 for k, v in _defaults.items():
     if k not in st.session_state:
         st.session_state[k] = v
+
+def auto_calc_taxes():
+    """Recalculate all tax rates from annual income, filing status and state — called on any change."""
+    income = st.session_state.get("annual_income_calc", 0.0)
+    filing = st.session_state.get("filing_status_key", "Single")
+    state  = st.session_state.get("state_selector_key", "Texas")
+    if income <= 0:
+        return
+    std_ded = STANDARD_DEDUCTIONS[filing]
+    taxable = max(0.0, income - std_ded)
+    st.session_state["fed_rate"]   = round(calc_federal_effective_rate(taxable, filing), 2)
+    st.session_state["state_rate"] = round(calc_state_effective_rate(income, state), 2)
+    ss = min(income, SS_WAGE_BASE_2024) / income * 6.2
+    st.session_state["ss_rate"]    = round(ss, 3)
+    med_threshold = 250_000 if filing == "Married Filing Jointly" else 200_000
+    med = 1.45 + ((income - med_threshold) / income * 0.9 if income > med_threshold else 0)
+    st.session_state["med_rate"]   = round(med, 3)
 
 # ── Header ────────────────────────────────────────────────────────────────────
 st.title("📊 Financial Planner & Investment Calculator")
@@ -214,91 +234,180 @@ with tab_expenses:
 
 # ── Taxes ─────────────────────────────────────────────────────────────────────
 with tab_taxes:
-    st.subheader("Taxes & Withholdings")
+    st.subheader("🏛️ Taxes & Withholdings")
 
-    # ── Auto-Calculate Section ────────────────────────────────────────────────
-    st.markdown("### 🧮 Auto-Calculate from Annual Income")
-    st.caption("Enter your annual income and state to auto-fill all tax rates below")
+    # ── Step 1: Inputs (reactive — rates update instantly on any change) ───────
+    st.markdown("### Step 1 — Enter Your Details")
+    st.caption("All tax rates below update automatically as you type or change selections.")
 
     ac1, ac2, ac3 = st.columns(3)
     with ac1:
-        annual_income_input = st.number_input(
+        st.number_input(
             "Annual Gross Income ($)",
             min_value=0.0,
-            value=float(round(total_income * 12, 2)),
+            value=float(round(total_income * 12, 2)) if st.session_state["annual_income_calc"] == 0.0 else st.session_state["annual_income_calc"],
             step=1000.0,
             format="%.2f",
-            help="Defaults to monthly income × 12 from the Income tab. Override freely.",
+            key="annual_income_calc",
+            on_change=auto_calc_taxes,
+            help="Defaults to monthly income × 12 from the Income tab.",
         )
     with ac2:
-        filing_status = st.selectbox(
+        st.selectbox(
             "Filing Status",
             ["Single", "Married Filing Jointly", "Married Filing Separately", "Head of Household"],
+            key="filing_status_key",
+            on_change=auto_calc_taxes,
         )
     with ac3:
-        state_selected = st.selectbox(
-            "State of Residence",
+        st.selectbox(
+            "🗺️ State of Residence",
             sorted(STATE_TAX.keys()),
-            index=sorted(STATE_TAX.keys()).index("Texas"),
+            key="state_selector_key",
+            on_change=auto_calc_taxes,
         )
 
-    # Calculate suggested rates from the annual income input
-    std_ded = STANDARD_DEDUCTIONS[filing_status]
-    taxable = max(0.0, annual_income_input - std_ded)
+    # Resolve live values for display
+    annual_income_input = st.session_state["annual_income_calc"]
+    filing_status       = st.session_state["filing_status_key"]
+    state_selected      = st.session_state["state_selector_key"]
+    std_ded             = STANDARD_DEDUCTIONS[filing_status]
+    taxable             = max(0.0, annual_income_input - std_ded)
 
-    sugg_federal = calc_federal_effective_rate(taxable, filing_status)
-    sugg_state   = calc_state_effective_rate(annual_income_input, state_selected)
-    sugg_ss      = (min(annual_income_input, SS_WAGE_BASE_2024) / annual_income_input * 6.2) if annual_income_input > 0 else 6.2
-    sugg_med     = 1.45
-    # Additional 0.9% Medicare surtax over $200K (single) / $250K (MFJ)
-    med_threshold = 250_000 if filing_status == "Married Filing Jointly" else 200_000
-    if annual_income_input > med_threshold:
-        sugg_med += (annual_income_input - med_threshold) / annual_income_input * 0.9
+    # ── Step 2: State Tax Breakdown ────────────────────────────────────────────
+    st.divider()
+    st.markdown(f"### Step 2 — State Tax: **{state_selected}**")
 
-    # Breakdown display
+    state_data  = STATE_TAX[state_selected]
+    state_rate_val = calc_state_effective_rate(annual_income_input, state_selected)
+
+    col_info, col_chart = st.columns([1, 2])
+    with col_info:
+        if state_data["type"] == "flat":
+            if state_data["rate"] == 0:
+                st.success(f"**{state_selected} has NO state income tax** 🎉")
+            else:
+                st.info(f"**{state_selected}** uses a **flat {state_data['rate']}%** rate on all income.")
+        else:
+            st.info(f"**{state_selected}** uses **progressive brackets** (rates rise with income).")
+
+        st.metric("Your Effective State Rate",
+                  f"{state_rate_val:.2f}%",
+                  f"${annual_income_input * state_rate_val / 100:,.0f} / yr" if annual_income_input > 0 else "—")
+        if annual_income_input > 0 and state_data["type"] == "brackets":
+            # Find marginal rate
+            marginal = 0
+            for lo, hi, rate in state_data["brackets"]:
+                if annual_income_input > lo:
+                    marginal = rate
+            st.metric("Marginal Rate (top bracket)", f"{marginal:.2f}%")
+
+    with col_chart:
+        if state_data["type"] == "brackets" and annual_income_input > 0:
+            brackets = state_data["brackets"]
+            b_labels, b_rates, b_colors = [], [], []
+            for lo, hi, rate in brackets:
+                hi_str = "No limit" if hi == math.inf else f"${hi:,.0f}"
+                b_labels.append(f"${lo:,.0f}–{hi_str}")
+                b_rates.append(rate)
+                b_colors.append("#60a5fa" if annual_income_input > lo else "#334155")
+            fig_st = go.Figure(go.Bar(
+                x=b_labels, y=b_rates,
+                marker_color=b_colors,
+                text=[f"{r}%" for r in b_rates],
+                textposition="outside",
+            ))
+            fig_st.update_layout(
+                title=f"{state_selected} — Tax Brackets",
+                template="plotly_dark", height=280,
+                yaxis=dict(ticksuffix="%", title="Rate"),
+                xaxis=dict(title="Income Range"),
+                margin=dict(t=40, b=60),
+                showlegend=False,
+            )
+            st.plotly_chart(fig_st, use_container_width=True)
+        elif state_data["type"] == "flat":
+            # Show a simple comparison of no-tax vs flat-tax vs progressive states for context
+            compare = {
+                "No Tax\n(TX, FL, NV…)": 0,
+                f"{state_selected}\n({state_data['rate']}%)": state_data["rate"],
+                "CA Top\n(13.3%)": 13.3,
+            }
+            fig_cmp = go.Figure(go.Bar(
+                x=list(compare.keys()), y=list(compare.values()),
+                marker_color=["#34d399", "#60a5fa", "#f87171"],
+                text=[f"{v}%" for v in compare.values()],
+                textposition="outside",
+            ))
+            fig_cmp.update_layout(
+                title="State Rate Comparison", template="plotly_dark", height=280,
+                yaxis=dict(ticksuffix="%"), margin=dict(t=40),
+            )
+            st.plotly_chart(fig_cmp, use_container_width=True)
+
+    # ── Step 3: Federal Bracket Visualizer ────────────────────────────────────
+    st.divider()
+    st.markdown("### Step 3 — Federal Tax Brackets")
     if annual_income_input > 0:
-        b1, b2, b3, b4, b5 = st.columns(5)
-        b1.metric("Federal Effective Rate",  f"{sugg_federal:.2f}%", f"on ${taxable:,.0f} taxable")
-        b2.metric("State Rate",              f"{sugg_state:.2f}%",   state_selected)
-        b3.metric("Social Security",         f"{sugg_ss:.2f}%",      f"cap ${SS_WAGE_BASE_2024:,}")
-        b4.metric("Medicare",                f"{sugg_med:.3f}%",     "+0.9% surtax >$200K")
-        b5.metric("Standard Deduction",      f"${std_ded:,}",        filing_status)
+        brackets = (FED_BRACKETS_MFJ if filing_status == "Married Filing Jointly"
+                    else FED_BRACKETS_HOH if filing_status == "Head of Household"
+                    else FED_BRACKETS_SINGLE)
+        fed_labels, fed_rates, fed_colors, fed_amounts = [], [], [], []
+        for lo, hi, rate in brackets:
+            hi_str = "No limit" if hi == math.inf else f"${hi:,.0f}"
+            fed_labels.append(f"${lo:,.0f}–{hi_str}\n({rate}%)")
+            fed_rates.append(rate)
+            fed_colors.append("#60a5fa" if taxable > lo else "#334155")
+            amt = max(0, (min(taxable, hi) - lo) * rate / 100) if taxable > lo else 0
+            fed_amounts.append(round(amt))
 
-        # Federal bracket visualizer
-        with st.expander("📊 Federal Tax Bracket Breakdown"):
-            brackets = FED_BRACKETS_MFJ if filing_status == "Married Filing Jointly" else (FED_BRACKETS_HOH if filing_status == "Head of Household" else FED_BRACKETS_SINGLE)
-            b_cols = st.columns(len(brackets))
-            for i, (lo, hi, rate) in enumerate(brackets):
-                active = taxable > lo
-                hi_str = "+" if hi == math.inf else f"–${hi/1000:.0f}K"
-                b_cols[i].markdown(
-                    f"{'🟦' if active else '⬜'} **{rate}%**  \n${lo/1000:.0f}K {hi_str}"
-                )
+        fig_fed = go.Figure()
+        fig_fed.add_trace(go.Bar(name="Tax Rate", x=fed_labels, y=fed_rates,
+                                 marker_color=fed_colors, yaxis="y",
+                                 text=[f"{r}%" for r in fed_rates], textposition="outside"))
+        fig_fed.add_trace(go.Bar(name="Tax Amount ($)", x=fed_labels, y=fed_amounts,
+                                 marker_color=["#fbbf24" if c == "#60a5fa" else "#1e3a5f" for c in fed_colors],
+                                 yaxis="y2", opacity=0.7,
+                                 text=[f"${a:,}" if a > 0 else "" for a in fed_amounts], textposition="inside"))
+        fig_fed.update_layout(
+            title=f"Federal Brackets — {filing_status} | Taxable Income: ${taxable:,.0f} (after ${std_ded:,} std. deduction)",
+            template="plotly_dark", height=340, barmode="group",
+            yaxis=dict(title="Rate (%)", ticksuffix="%"),
+            yaxis2=dict(title="Tax Amount ($)", overlaying="y", side="right", tickprefix="$"),
+            legend=dict(orientation="h", y=1.1),
+        )
+        st.plotly_chart(fig_fed, use_container_width=True)
 
-        # Apply button
-        if st.button("⬇️ Apply Auto-Calculated Rates to fields below", type="primary", use_container_width=True):
-            st.session_state["fed_rate"]   = round(sugg_federal, 2)
-            st.session_state["state_rate"] = round(sugg_state, 2)
-            st.session_state["ss_rate"]    = round(sugg_ss, 3)
-            st.session_state["med_rate"]   = round(sugg_med, 3)
-            st.toast("✅ Tax rates applied!", icon="✅")
+        # Summary metrics row
+        sugg_federal = calc_federal_effective_rate(taxable, filing_status)
+        sugg_ss      = min(annual_income_input, SS_WAGE_BASE_2024) / annual_income_input * 6.2
+        med_threshold = 250_000 if filing_status == "Married Filing Jointly" else 200_000
+        sugg_med     = 1.45 + ((annual_income_input - med_threshold) / annual_income_input * 0.9 if annual_income_input > med_threshold else 0)
+        total_calculated = sugg_federal + state_rate_val + sugg_ss + sugg_med
+
+        m1, m2, m3, m4, m5 = st.columns(5)
+        m1.metric("Federal Effective",   f"{sugg_federal:.2f}%",     f"${annual_income_input*sugg_federal/100:,.0f}/yr")
+        m2.metric("State Effective",     f"{state_rate_val:.2f}%",   f"${annual_income_input*state_rate_val/100:,.0f}/yr")
+        m3.metric("Social Security",     f"{sugg_ss:.2f}%",          f"cap ${SS_WAGE_BASE_2024:,}")
+        m4.metric("Medicare",            f"{sugg_med:.3f}%",         "+0.9% surtax >$200K")
+        m5.metric("Total Calculated",    f"{total_calculated:.2f}%", f"${annual_income_input*total_calculated/100:,.0f}/yr")
 
     st.divider()
 
-    # ── Manual / Editable Rate Fields ────────────────────────────────────────
-    st.markdown("### ✏️ Tax Rate Fields (editable)")
-    st.caption("These are pre-filled by the calculator above. You can adjust any value manually.")
+    # ── Step 4: Editable Rate Fields ──────────────────────────────────────────
+    st.markdown("### Step 4 — Review & Adjust Rates")
+    st.caption("Rates auto-filled from the calculator above. Edit any field to override.")
 
     c1, c2, c3 = st.columns(3)
     with c1:
-        federal_rate     = st.number_input("Federal Income Tax Rate (%)",   min_value=0.0, max_value=100.0, step=0.01, format="%.2f", key="fed_rate")
-        state_rate       = st.number_input("State Income Tax Rate (%)",     min_value=0.0, max_value=100.0, step=0.01, format="%.2f", key="state_rate")
+        federal_rate     = st.number_input("Federal Income Tax Rate (%)",  min_value=0.0, max_value=100.0, step=0.01, format="%.2f", key="fed_rate")
+        state_rate       = st.number_input("State Income Tax Rate (%)",    min_value=0.0, max_value=100.0, step=0.01, format="%.2f", key="state_rate")
     with c2:
-        social_security  = st.number_input("Social Security / OASDI (%)",  min_value=0.0, max_value=100.0, step=0.01, format="%.3f", key="ss_rate")
-        medicare         = st.number_input("Medicare / FICA (%)",           min_value=0.0, max_value=100.0, step=0.01, format="%.3f", key="med_rate")
+        social_security  = st.number_input("Social Security / OASDI (%)", min_value=0.0, max_value=100.0, step=0.01, format="%.3f", key="ss_rate")
+        medicare         = st.number_input("Medicare / FICA (%)",          min_value=0.0, max_value=100.0, step=0.01, format="%.3f", key="med_rate")
     with c3:
-        state_disability = st.number_input("State Disability Ins. (%)",    min_value=0.0, max_value=100.0, step=0.01, format="%.2f", key="sdi_rate")
-        other_withholding= st.number_input("Other Withholdings (%)",        min_value=0.0, max_value=100.0, step=0.01, format="%.2f", key="other_rate",
+        state_disability = st.number_input("State Disability Ins. (%)",   min_value=0.0, max_value=100.0, step=0.01, format="%.2f", key="sdi_rate")
+        other_withholding= st.number_input("Other Withholdings (%)",       min_value=0.0, max_value=100.0, step=0.01, format="%.2f", key="other_rate",
                                            help="401k pre-tax, HSA, etc.")
 
     total_tax_rate = federal_rate + state_rate + social_security + medicare + state_disability + other_withholding
@@ -307,16 +416,10 @@ with tab_taxes:
 
     st.divider()
     col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Total Withholding Rate",  f"{total_tax_rate:.2f}%")
-    col2.metric("Annual Tax Estimate",     f"${monthly_taxes * 12:,.0f}")
-    col3.metric("Monthly Taxes",           f"-${monthly_taxes:,.2f}")
-    col4.metric("Net Monthly Take-Home",   f"${net_monthly:,.2f}")
-
-    if annual_income_input > 0:
-        st.caption(
-            f"Estimated annual tax burden: **${monthly_taxes*12:,.0f}** "
-            f"({total_tax_rate:.1f}% effective rate) on **${annual_income_input:,.0f}** gross income."
-        )
+    col1.metric("Total Withholding Rate", f"{total_tax_rate:.2f}%")
+    col2.metric("Annual Tax Estimate",    f"${monthly_taxes * 12:,.0f}")
+    col3.metric("Monthly Taxes",          f"-${monthly_taxes:,.2f}")
+    col4.metric("Net Monthly Take-Home",  f"${net_monthly:,.2f}")
 
 # ── Investment ────────────────────────────────────────────────────────────────
 with tab_investment:
