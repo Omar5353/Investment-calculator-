@@ -445,15 +445,60 @@ with tab_taxes:
 
 # ── Investment ────────────────────────────────────────────────────────────────
 with tab_investment:
-    st.subheader("Investment Settings")
-    st.caption("Configure how much of your net income to invest and your expected returns")
+    st.subheader("📈 Investment Settings")
 
-    c1, c2, c3, c4 = st.columns(4)
-    with c1:
-        invest_pct = st.number_input(
-            f"Investment % of Net Income\n(Net: ${net_monthly:,.0f}/mo)",
-            min_value=0.0, max_value=100.0, value=15.0, step=0.5, format="%.1f"
-        )
+    # ── Surplus banner ────────────────────────────────────────────────────────
+    monthly_surplus = net_monthly - total_expenses
+    s1, s2, s3, s4 = st.columns(4)
+    s1.metric("Net Monthly Income",   f"${net_monthly:,.2f}")
+    s2.metric("Total Expenses",       f"-${total_expenses:,.2f}")
+    s3.metric("Monthly Surplus",      f"${monthly_surplus:,.2f}",
+              delta="available to invest" if monthly_surplus > 0 else "deficit — reduce expenses")
+    s4.metric("Surplus %",
+              f"{(monthly_surplus / net_monthly * 100):.1f}%" if net_monthly > 0 else "—",
+              "of net income")
+
+    st.divider()
+
+    # ── Auto-invest toggle ────────────────────────────────────────────────────
+    if "auto_invest_surplus" not in st.session_state:
+        st.session_state["auto_invest_surplus"] = False
+
+    auto_invest = st.toggle(
+        "🔄 Automatically invest all remaining surplus (net income − expenses)",
+        key="auto_invest_surplus",
+    )
+
+    if auto_invest:
+        if monthly_surplus > 0:
+            monthly_investment = monthly_surplus
+            invest_pct = (monthly_investment / net_monthly * 100) if net_monthly > 0 else 0
+            st.success(
+                f"Investing your full surplus: **${monthly_investment:,.2f}/mo** "
+                f"({invest_pct:.1f}% of net income)"
+            )
+        else:
+            monthly_investment = 0.0
+            invest_pct = 0.0
+            st.warning("⚠️ No surplus to invest — your expenses exceed your net income. Reduce expenses first.")
+    else:
+        c1_inv, _ = st.columns([1, 3])
+        with c1_inv:
+            invest_pct = st.number_input(
+                f"Investment % of Net Income  (Net: ${net_monthly:,.0f}/mo)",
+                min_value=0.0, max_value=100.0, value=15.0, step=0.5, format="%.1f",
+            )
+        monthly_investment = net_monthly * (invest_pct / 100)
+        if monthly_investment > monthly_surplus and monthly_surplus > 0:
+            st.warning(
+                f"⚠️ You're investing **${monthly_investment:,.2f}** but your surplus is only "
+                f"**${monthly_surplus:,.2f}**. Consider reducing your investment % or expenses."
+            )
+
+    st.divider()
+
+    # ── Return & duration settings ────────────────────────────────────────────
+    c2, c3, c4 = st.columns(3)
     with c2:
         arr = st.number_input(
             "Annual Rate of Return — ARR (%)\n(S&P 500 avg ~10%, Bonds ~4–5%)",
@@ -466,7 +511,6 @@ with tab_investment:
 
     freq_map         = {"Daily": 365, "Weekly": 52, "Monthly": 12, "Quarterly": 4, "Annually": 1}
     periods_per_year = freq_map[freq_label]
-    monthly_investment  = net_monthly * (invest_pct / 100)
     total_contributions = monthly_investment * 12 * years
     r   = (arr / 100) / periods_per_year
     n   = years * periods_per_year
@@ -476,7 +520,7 @@ with tab_investment:
     total_gains  = future_value - total_contributions
 
     col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Monthly Investment",     f"${monthly_investment:,.0f}",    f"{invest_pct}% of net income")
+    col1.metric("Monthly Investment",     f"${monthly_investment:,.0f}",    f"{invest_pct:.1f}% of net income")
     col2.metric("Total Contributions",    f"${total_contributions:,.0f}",   f"Over {years} years")
     col3.metric("Investment Gains",       f"${total_gains:,.0f}",           "Compound interest earned")
     col4.metric("Future Portfolio Value", f"${future_value:,.0f}",          f"In {years} yrs at {arr}% ARR")
