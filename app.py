@@ -560,6 +560,172 @@ with tab_investment:
             status = (f"✅ {yrs_to:.1f} yrs" if yrs_to <= years else f"~{yrs_to:.1f} yrs") if yrs_to else "—"
             m_cols[i].metric(label, status)
 
+    # ── House Purchase Goal ────────────────────────────────────────────────────
+    st.divider()
+    st.markdown("### 🏠 House Purchase Goal")
+
+    if "house_goal_on" not in st.session_state:
+        st.session_state["house_goal_on"] = False
+
+    house_goal_on = st.toggle("Enable house purchase goal", key="house_goal_on")
+
+    if house_goal_on:
+        # Auto-suggest capital gains rate from income + filing status
+        ann_inc   = st.session_state.get("annual_income_calc", 0.0)
+        filing    = st.session_state.get("filing_status_key", "Single")
+        CG_THRESHOLDS = {
+            "Single":                    [(47_025, 0), (518_900, 15), (math.inf, 20)],
+            "Married Filing Jointly":    [(94_050, 0), (583_750, 15), (math.inf, 20)],
+            "Married Filing Separately": [(47_025, 0), (291_850, 15), (math.inf, 20)],
+            "Head of Household":         [(63_000, 0), (551_350, 15), (math.inf, 20)],
+        }
+        suggested_cg = 15  # default
+        for threshold, rate in CG_THRESHOLDS.get(filing, CG_THRESHOLDS["Single"]):
+            if ann_inc <= threshold:
+                suggested_cg = rate
+                break
+
+        hc1, hc2, hc3 = st.columns(3)
+        with hc1:
+            house_price = st.number_input(
+                "Target House Price / Down Payment ($)",
+                min_value=0.0, step=10_000.0, format="%.0f",
+                help="The amount you need after paying capital gains tax on your investment gains.",
+            )
+        with hc2:
+            cg_rate_pct = st.number_input(
+                "Capital Gains Tax Rate (%)",
+                min_value=0.0, max_value=40.0,
+                value=float(suggested_cg), step=1.0, format="%.1f",
+                help=f"2024 long-term rate suggested for your income: {suggested_cg}%",
+            )
+        with hc3:
+            st.markdown("<br>", unsafe_allow_html=True)
+            st.info(f"**2024 suggested rate: {suggested_cg}%**  \n"
+                    f"Based on ${ann_inc:,.0f} income ({filing})")
+
+        if house_price > 0 and monthly_investment > 0:
+            cg_rate = cg_rate_pct / 100
+
+            # ── Phase 1: find the year portfolio (after tax) reaches house_price
+            sell_year = None
+            sell_fv = sell_contributions = sell_gains = sell_tax = after_tax_proceeds = 0.0
+
+            # Search beyond `years` too (up to 60) so we can report even if outside window
+            max_search = max(years, 60)
+            for y in range(1, max_search + 1):
+                n_y   = y * periods_per_year
+                fv_y  = pmt * ((math.pow(1 + r, n_y) - 1) / r) if arr > 0 else monthly_investment * 12 * y
+                c_y   = monthly_investment * 12 * y
+                g_y   = max(0.0, fv_y - c_y)
+                # After-tax = contributions (basis, no tax) + gains after CGT
+                at_y  = c_y + g_y * (1 - cg_rate)
+                if at_y >= house_price:
+                    sell_year          = y
+                    sell_fv            = fv_y
+                    sell_contributions = c_y
+                    sell_gains         = g_y
+                    sell_tax           = g_y * cg_rate
+                    after_tax_proceeds = at_y
+                    break
+
+            if sell_year is None:
+                st.error(
+                    f"❌ Your portfolio won't reach **${house_price:,.0f}** (after {cg_rate_pct:.0f}% CGT) "
+                    f"even in 60 years at {arr}% ARR. "
+                    f"Try increasing your monthly investment, ARR, or lowering the target."
+                )
+            else:
+                within_window = sell_year <= years
+                remaining_years = max(0, years - sell_year)
+
+                # Phase 2: restart from $0 for remaining years
+                n2   = remaining_years * periods_per_year
+                phase2_fv = (pmt * ((math.pow(1 + r, n2) - 1) / r)
+                             if (arr > 0 and remaining_years > 0) else monthly_investment * 12 * remaining_years)
+                phase2_contribs = monthly_investment * 12 * remaining_years
+                phase2_gains    = max(0.0, phase2_fv - phase2_contribs)
+
+                import datetime
+                current_year = datetime.date.today().year
+                purchase_year = current_year + sell_year
+
+                # ── Summary metrics
+                if within_window:
+                    st.success(
+                        f"🏠 You can buy the house in **Year {sell_year}** ({purchase_year})  |  "
+                        f"Portfolio value: **${sell_fv:,.0f}**  →  "
+                        f"After {cg_rate_pct:.0f}% CGT: **${after_tax_proceeds:,.0f}**  |  "
+                        f"Tax paid: **${sell_tax:,.0f}**"
+                    )
+                else:
+                    st.warning(
+                        f"🏠 Target reachable in **Year {sell_year}** ({purchase_year}) — "
+                        f"outside your {years}-yr window. Extend duration or raise ARR."
+                    )
+
+                r1c1, r1c2, r1c3, r1c4 = st.columns(4)
+                r1c1.metric("Year of Purchase",       f"Year {sell_year} ({purchase_year})")
+                r1c2.metric("Portfolio at Sale",      f"${sell_fv:,.0f}")
+                r1c3.metric("Capital Gains Tax",      f"-${sell_tax:,.0f}", f"{cg_rate_pct:.0f}% on ${sell_gains:,.0f} gains")
+                r1c4.metric("Net After-Tax Proceeds", f"${after_tax_proceeds:,.0f}")
+
+                if within_window and remaining_years > 0:
+                    st.markdown(f"**Phase 2** — After buying, you restart investing for the remaining **{remaining_years} years**:")
+                    r2c1, r2c2, r2c3 = st.columns(3)
+                    r2c1.metric("Phase 2 Monthly Investment", f"${monthly_investment:,.0f}")
+                    r2c2.metric("Phase 2 Total Contributions", f"${phase2_contribs:,.0f}")
+                    r2c3.metric("Phase 2 Final Portfolio",    f"${phase2_fv:,.0f}",
+                                f"+${phase2_gains:,.0f} gains")
+
+                # ── Dual-phase chart
+                phase1_years = list(range(sell_year + 1))
+                phase1_vals  = []
+                for y in phase1_years:
+                    n_y  = y * periods_per_year
+                    fv_y = pmt * ((math.pow(1 + r, n_y) - 1) / r) if arr > 0 else monthly_investment * 12 * y
+                    phase1_vals.append(round(fv_y))
+
+                phase2_x, phase2_vals = [], []
+                if within_window and remaining_years > 0:
+                    for y in range(remaining_years + 1):
+                        n_y  = y * periods_per_year
+                        fv_y = (pmt * ((math.pow(1 + r, n_y) - 1) / r)
+                                if arr > 0 else monthly_investment * 12 * y)
+                        phase2_x.append(sell_year + y)
+                        phase2_vals.append(round(fv_y))
+
+                fig_house = go.Figure()
+                fig_house.add_trace(go.Scatter(
+                    x=phase1_years, y=phase1_vals, name="Phase 1 — Save for House",
+                    fill="tozeroy", line=dict(color="#60a5fa", width=2.5)
+                ))
+                if phase2_vals:
+                    fig_house.add_trace(go.Scatter(
+                        x=phase2_x, y=phase2_vals, name="Phase 2 — Resume Investing",
+                        fill="tozeroy", line=dict(color="#34d399", width=2.5)
+                    ))
+                # House target line
+                fig_house.add_hline(
+                    y=house_price, line_dash="dash", line_color="#fbbf24",
+                    annotation_text=f"House Target ${house_price:,.0f}",
+                    annotation_position="top left",
+                )
+                # Sell marker
+                fig_house.add_vline(
+                    x=sell_year, line_dash="dot", line_color="#f87171",
+                    annotation_text=f"🏠 Sell Yr {sell_year}",
+                    annotation_position="top right",
+                )
+                fig_house.update_layout(
+                    title="📈 Two-Phase Investment Plan",
+                    xaxis_title="Year", yaxis_title="Portfolio Value ($)",
+                    template="plotly_dark", height=420,
+                    yaxis=dict(tickprefix="$", tickformat=",.0f"),
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                )
+                st.plotly_chart(fig_house, use_container_width=True)
+
 # ── Dashboard ─────────────────────────────────────────────────────────────────
 with tab_dashboard:
     st.subheader("Financial Dashboard")
