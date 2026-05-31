@@ -514,7 +514,7 @@ with tab_investment:
     total_contributions = monthly_investment * 12 * years
     r   = (arr / 100) / periods_per_year
     n   = years * periods_per_year
-    pmt = monthly_investment * (periods_per_year / 12)
+    pmt = monthly_investment * (12 / periods_per_year)
 
     future_value = pmt * ((math.pow(1 + r, n) - 1) / r) if (arr > 0 and monthly_investment > 0) else total_contributions
     total_gains  = future_value - total_contributions
