@@ -38,6 +38,13 @@ STANDARD_DEDUCTIONS = {
 
 SS_WAGE_BASE_2024 = 168_600  # Social Security wage cap
 
+CAPITAL_GAINS_BRACKETS_2024 = {
+    "Single":                    [(0, 47_025, 0), (47_025, 518_900, 15), (518_900, math.inf, 20)],
+    "Married Filing Jointly":    [(0, 94_050, 0), (94_050, 583_750, 15), (583_750, math.inf, 20)],
+    "Married Filing Separately": [(0, 47_025, 0), (47_025, 291_850, 15), (291_850, math.inf, 20)],
+    "Head of Household":         [(0, 63_000, 0), (63_000, 551_350, 15), (551_350, math.inf, 20)],
+}
+
 # State tax data: flat rate OR progressive brackets (2024 approximate)
 # Format: {"type": "flat", "rate": X}  OR  {"type": "brackets", "brackets": [(lo, hi, rate), ...]}
 STATE_TAX = {
@@ -121,6 +128,23 @@ def calc_state_effective_rate(income, state):
         return data["rate"]
     tax = calc_bracket_tax(income, data["brackets"])
     return (tax / income) * 100
+
+def calc_capital_gains_tax(gains, filing_status, ordinary_taxable_income=0.0):
+    if gains <= 0:
+        return 0.0
+    brackets = CAPITAL_GAINS_BRACKETS_2024.get(filing_status, CAPITAL_GAINS_BRACKETS_2024["Single"])
+    ordinary_taxable_income = max(0.0, ordinary_taxable_income)
+    total_taxable_income = ordinary_taxable_income + gains
+    tax = 0.0
+    for lo, hi, rate in brackets:
+        gain_in_bracket = max(0.0, min(total_taxable_income, hi) - max(ordinary_taxable_income, lo))
+        tax += gain_in_bracket * rate / 100
+    return tax
+
+def calc_capital_gains_effective_rate(gains, filing_status, ordinary_taxable_income=0.0):
+    if gains <= 0:
+        return 0.0
+    return (calc_capital_gains_tax(gains, filing_status, ordinary_taxable_income) / gains) * 100
 
 # ── Session state defaults ─────────────────────────────────────────────────────
 _defaults = {
@@ -570,20 +594,7 @@ with tab_investment:
     house_goal_on = st.toggle("Enable house purchase goal", key="house_goal_on")
 
     if house_goal_on:
-        # Auto-suggest capital gains rate from income + filing status
-        ann_inc   = st.session_state.get("annual_income_calc", 0.0)
         filing    = st.session_state.get("filing_status_key", "Single")
-        CG_THRESHOLDS = {
-            "Single":                    [(47_025, 0), (518_900, 15), (math.inf, 20)],
-            "Married Filing Jointly":    [(94_050, 0), (583_750, 15), (math.inf, 20)],
-            "Married Filing Separately": [(47_025, 0), (291_850, 15), (math.inf, 20)],
-            "Head of Household":         [(63_000, 0), (551_350, 15), (math.inf, 20)],
-        }
-        suggested_cg = 15  # default
-        for threshold, rate in CG_THRESHOLDS.get(filing, CG_THRESHOLDS["Single"]):
-            if ann_inc <= threshold:
-                suggested_cg = rate
-                break
 
         hc1, hc2, hc3 = st.columns(3)
         with hc1:
@@ -593,23 +604,31 @@ with tab_investment:
                 help="The amount you need after paying capital gains tax on your investment gains.",
             )
         with hc2:
-            cg_rate_pct = st.number_input(
-                "Capital Gains Tax Rate (%)",
-                min_value=0.0, max_value=40.0,
-                value=float(suggested_cg), step=1.0, format="%.1f",
-                help=f"2024 long-term rate suggested for your income: {suggested_cg}%",
+            manual_cg_rate = st.toggle(
+                "Manually set capital gains tax rate",
+                help="Leave off to calculate capital gains tax from the investment gains realized when you sell.",
             )
+            cg_rate_pct = None
+            if manual_cg_rate:
+                cg_rate_pct = st.number_input(
+                    "Capital Gains Tax Rate (%)",
+                    min_value=0.0, max_value=40.0,
+                    value=15.0, step=1.0, format="%.1f",
+                    help="Optional override. Auto mode bases tax on the gains from the investment sale.",
+                )
         with hc3:
             st.markdown("<br>", unsafe_allow_html=True)
-            st.info(f"**2024 suggested rate: {suggested_cg}%**  \n"
-                    f"Based on ${ann_inc:,.0f} income ({filing})")
+            st.info(
+                "**Auto CGT mode**  \n"
+                "Taxes the realized investment gains at sale using the 2024 long-term stock capital gains bracket model."
+            )
 
         if house_price > 0 and monthly_investment > 0:
-            cg_rate = cg_rate_pct / 100
+            ordinary_taxable_income = max(0.0, total_income * 12 - STANDARD_DEDUCTIONS[filing])
 
             # ── Phase 1: find the year portfolio (after tax) reaches house_price
             sell_year = None
-            sell_fv = sell_contributions = sell_gains = sell_tax = after_tax_proceeds = 0.0
+            sell_fv = sell_contributions = sell_gains = sell_tax = after_tax_proceeds = sell_cg_rate_pct = 0.0
 
             # Search beyond `years` too (up to 60) so we can report even if outside window
             max_search = max(years, 60)
@@ -618,20 +637,36 @@ with tab_investment:
                 fv_y  = pmt * ((math.pow(1 + r, n_y) - 1) / r) if arr > 0 else monthly_investment * 12 * y
                 c_y   = monthly_investment * 12 * y
                 g_y   = max(0.0, fv_y - c_y)
-                # After-tax = contributions (basis, no tax) + gains after CGT
-                at_y  = c_y + g_y * (1 - cg_rate)
+                tax_y = (
+                    g_y * (cg_rate_pct / 100)
+                    if manual_cg_rate
+                    else calc_capital_gains_tax(g_y, filing, ordinary_taxable_income)
+                )
+                cg_rate_y = (
+                    cg_rate_pct
+                    if manual_cg_rate
+                    else calc_capital_gains_effective_rate(g_y, filing, ordinary_taxable_income)
+                )
+                # After-tax = contributions (basis, no tax) + gains after CGT.
+                at_y  = fv_y - tax_y
                 if at_y >= house_price:
                     sell_year          = y
                     sell_fv            = fv_y
                     sell_contributions = c_y
                     sell_gains         = g_y
-                    sell_tax           = g_y * cg_rate
+                    sell_tax           = tax_y
                     after_tax_proceeds = at_y
+                    sell_cg_rate_pct   = cg_rate_y
                     break
 
             if sell_year is None:
+                cgt_description = (
+                    f"{cg_rate_pct:.0f}% manual CGT"
+                    if manual_cg_rate
+                    else "auto stock CGT based on realized investment gains"
+                )
                 st.error(
-                    f"❌ Your portfolio won't reach **${house_price:,.0f}** (after {cg_rate_pct:.0f}% CGT) "
+                    f"❌ Your portfolio won't reach **${house_price:,.0f}** (after {cgt_description}) "
                     f"even in 60 years at {arr}% ARR. "
                     f"Try increasing your monthly investment, ARR, or lowering the target."
                 )
@@ -655,7 +690,7 @@ with tab_investment:
                     st.success(
                         f"🏠 You can buy the house in **Year {sell_year}** ({purchase_year})  |  "
                         f"Portfolio value: **${sell_fv:,.0f}**  →  "
-                        f"After {cg_rate_pct:.0f}% CGT: **${after_tax_proceeds:,.0f}**  |  "
+                        f"After {sell_cg_rate_pct:.1f}% effective CGT: **${after_tax_proceeds:,.0f}**  |  "
                         f"Tax paid: **${sell_tax:,.0f}**"
                     )
                 else:
@@ -667,7 +702,7 @@ with tab_investment:
                 r1c1, r1c2, r1c3, r1c4 = st.columns(4)
                 r1c1.metric("Year of Purchase",       f"Year {sell_year} ({purchase_year})")
                 r1c2.metric("Portfolio at Sale",      f"${sell_fv:,.0f}")
-                r1c3.metric("Capital Gains Tax",      f"-${sell_tax:,.0f}", f"{cg_rate_pct:.0f}% on ${sell_gains:,.0f} gains")
+                r1c3.metric("Capital Gains Tax",      f"-${sell_tax:,.0f}", f"{sell_cg_rate_pct:.1f}% on ${sell_gains:,.0f} gains")
                 r1c4.metric("Net After-Tax Proceeds", f"${after_tax_proceeds:,.0f}")
 
                 if within_window and remaining_years > 0:
